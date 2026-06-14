@@ -80,8 +80,41 @@ struct SiegeRecord {
     optimal_velocity_mps: f64,
 }
 
+#[derive(Debug, Clone)]
+struct BufferLimits {
+    sensor: usize,
+    ballistics: usize,
+    siege: usize,
+}
+
+impl Default for BufferLimits {
+    fn default() -> Self {
+        Self {
+            sensor: 1000,
+            ballistics: 500,
+            siege: 500,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StorageLimitsRef(pub BufferLimits);
+
 impl Database {
     pub fn new() -> Self {
+        Self::with_limits(BufferLimits::default())
+    }
+
+    pub fn new_with_config(cfg: &crate::config::StorageConfig) -> Self {
+        Self::with_limits(BufferLimits {
+            sensor: cfg.sensor_buffer_limit,
+            ballistics: cfg.ballistics_buffer_limit,
+            siege: cfg.siege_buffer_limit,
+        })
+    }
+
+    fn with_limits(limits: BufferLimits) -> Self {
+        let _limits = Arc::new(Mutex::new(limits));
         Self {
             trebuchets: Arc::new(Mutex::new(Vec::new())),
             wall_types: Arc::new(Mutex::new(Vec::new())),
@@ -279,8 +312,10 @@ impl Database {
     pub async fn insert_sensor_data(&self, data: SensorData) -> Result<(), String> {
         let mut buffer = self.sensor_buffer.lock().await;
         buffer.push(data);
-        if buffer.len() > 1000 {
-            buffer.drain(0..buffer.len() - 1000);
+        let limit = 1000usize;
+        if buffer.len() > limit {
+            let excess = buffer.len() - limit;
+            buffer.drain(0..excess);
         }
         Ok(())
     }
@@ -308,8 +343,10 @@ impl Database {
 
         let mut buffer = self.ballistics_buffer.lock().await;
         buffer.push(record);
-        if buffer.len() > 500 {
-            buffer.drain(0..buffer.len() - 500);
+        let limit = 500usize;
+        if buffer.len() > limit {
+            let excess = buffer.len() - limit;
+            buffer.drain(0..excess);
         }
         Ok(())
     }
@@ -344,8 +381,10 @@ impl Database {
 
         let mut buffer = self.siege_buffer.lock().await;
         buffer.push(record);
-        if buffer.len() > 500 {
-            buffer.drain(0..buffer.len() - 500);
+        let limit = 500usize;
+        if buffer.len() > limit {
+            let excess = buffer.len() - limit;
+            buffer.drain(0..excess);
         }
         Ok(())
     }
