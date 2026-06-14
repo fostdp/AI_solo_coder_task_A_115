@@ -3,6 +3,7 @@ mod ballistics;
 mod siege;
 mod storage;
 mod config;
+mod metrics;
 mod udp_receiver;
 mod ballistic_simulator;
 mod siege_evaluator;
@@ -15,22 +16,40 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tower_http::cors::{Any, CorsLayer};
+use tracing::{info, warn, error};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
 async fn main() {
-    env_logger::init();
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "info".into()))
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+
+    info!("Initializing siege simulation backend...");
+
+    metrics::init_metrics();
+    info!("Metrics subsystem initialized (Prometheus exporter)");
 
     let app_config = Arc::new(AppConfig::load());
+    info!("Configuration loaded");
 
     let db = Arc::new(storage::Database::new_with_config(&app_config.storage));
 
     if let Err(e) = db.load_trebuchets().await {
-        eprintln!("Failed to load trebuchets: {}", e);
+        error!("Failed to load trebuchets: {}", e);
     }
 
     if let Err(e) = db.load_wall_types().await {
-        eprintln!("Failed to load wall types: {}", e);
+        error!("Failed to load wall types: {}", e);
     }
+
+    info!("Loaded {} trebuchets, {} wall types",
+        db.get_trebuchets().await.len(),
+        db.get_wall_types().await.len()
+    );
+    metrics::gauge_active_trebuchets(db.get_trebuchets().await.len());
 
     let latest_results = Arc::new(Mutex::new(
         HashMap::<u32, ballistics::BallisticResult>::new(),
@@ -43,6 +62,11 @@ async fn main() {
         mpsc::channel::<udp_receiver::SensorEnvelope>(app_config.channel.udp_to_ballistic_capacity);
     let (ballistic_tx, siege_rx) =
         mpsc::channel::<ballistic_simulator::BallisticEnvelope>(app_config.channel.ballistic_to_siege_capacity);
+
+    info!("Channel pipeline: UDP→Ballistic (cap={}), Ballistic→Siege (cap={})",
+        app_config.channel.udp_to_ballistic_capacity,
+        app_config.channel.ballistic_to_siege_capacity
+    );
 
     let udp_cfg = app_config.udp.clone();
     let db_for_udp = db.clone();
@@ -58,14 +82,16 @@ async fn main() {
         )
         .await
         {
-            eprintln!("Legacy UDP server error (non-fatal): {}", e);
+            warn!("Legacy UDP server stopped: {}", e);
         }
     });
 
     let udp_cfg_new = Arc::new(app_config.udp.clone());
+    let udp_tx_clone = udp_tx.clone();
     tokio::spawn(async move {
-        if let Err(e) = udp_receiver::run_udp_receiver(udp_cfg_new, udp_tx).await {
-            eprintln!("UDP Receiver service crashed: {}", e);
+        info!("UDP Receiver starting on {}", udp_cfg_new.bind_addr);
+        if let Err(e) = udp_receiver::run_udp_receiver(udp_cfg_new, udp_tx_clone).await {
+            error!("UDP Receiver crashed: {}", e);
         }
     });
 
@@ -80,6 +106,7 @@ async fn main() {
         ballistic_tx,
     );
     tokio::spawn(async move {
+        info!("Ballistic simulator started");
         ballistic.run().await;
     });
 
@@ -93,6 +120,7 @@ async fn main() {
         siege_rx,
     );
     tokio::spawn(async move {
+        info!("Siege evaluator started");
         evaluator.run().await;
     });
 
@@ -111,18 +139,19 @@ async fn main() {
 
     let http_addr = "0.0.0.0:8080";
 
-    println!("=============================================");
-    println!("  Trebuchet Siege Simulation Backend");
-    println!("  Architecture: UDP Recv → Ballistic → Siege");
-    println!("  Channel sizes: UDP→Ballistic={}, Ballistic→Siege={}",
+    info!("=============================================");
+    info!("  Trebuchet Siege Simulation Backend");
+    info!("  Architecture: UDP Recv → Ballistic → Siege");
+    info!("  Channel sizes: UDP→Ballistic={}, Ballistic→Siege={}",
         app_config.channel.udp_to_ballistic_capacity,
         app_config.channel.ballistic_to_siege_capacity
     );
-    println!("=============================================");
-    println!("HTTP  server: http://{}", http_addr);
-    println!("UDP   server: udp://{}", app_config.udp.bind_addr);
-    println!("ClickHouse:   disabled (memory buffer)");
-    println!("=============================================");
+    info!("=============================================");
+    info!("HTTP  server: http://{}", http_addr);
+    info!("UDP   server: udp://{}", app_config.udp.bind_addr);
+    info!("Metrics:      http://{}/metrics", http_addr);
+    info!("ClickHouse:   disabled (memory buffer)");
+    info!("=============================================");
 
     let addr: std::net::SocketAddr = http_addr.parse().unwrap();
     axum::Server::bind(&addr)
