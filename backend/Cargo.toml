@@ -8,7 +8,10 @@ tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 axum = "0.6"
-tower-http = { version = "0.4", features = ["cors"] }
+tower-http = { version = "0.4", features = ["cors", "compression-gzip", "trace"] }
 chrono = { version = "0.4", features = ["serde"] }
-log = "0.4"
-env_logger = "0.10"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+metrics = "0.21"
+metrics-exporter-prometheus = "0.12"
+metrics-util = "0.15"
