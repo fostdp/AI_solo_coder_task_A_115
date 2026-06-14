@@ -1,13 +1,16 @@
 use crate::ballistic_simulator::BallisticEnvelope;
 use crate::ballistics::estimate_projectile_diameter;
 use crate::config::{AppConfig, SiegeConfig, MaterialConfig};
+use crate::metrics;
 use crate::siege::{assess_siege_damage, SiegeAssessment, SiegeInput, WallProperties};
 use crate::storage::Database;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::{mpsc::Receiver, Mutex};
+use tracing::{debug, info, warn, error};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SiegeEnvelope {
@@ -43,12 +46,12 @@ impl SiegeEvaluator {
     }
 
     pub async fn run(mut self) {
-        println!(
+        info!(
             "[SiegeEvaluator] started (default_wall=rammed_earth {}m)",
             DEFAULT_WALL.thickness_m
         );
         let mut processed: u64 = 0;
-        let mut timer = std::time::Instant::now();
+        let mut timer = Instant::now();
 
         while let Some(env) = self.rx.recv().await {
             let assessed_at = Utc::now();
@@ -60,6 +63,7 @@ impl SiegeEvaluator {
                 self.config.material.stone_density_kgm3,
             );
 
+            let eval_start = Instant::now();
             let (input, assessment) = Self::assess(
                 &self.config.siege,
                 env.result.impact_kinetic_energy_j,
@@ -68,6 +72,8 @@ impl SiegeEvaluator {
                 env.result.impact_angle_deg,
                 default_wall.clone(),
             );
+            metrics::record_siege_duration(eval_start);
+            metrics::increment_siege_assessments();
 
             {
                 let mut guard = self.latest_siege.lock().await;
@@ -92,7 +98,7 @@ impl SiegeEvaluator {
                 )
                 .await
             {
-                eprintln!("[SiegeEvaluator] persist failed: {}", e);
+                warn!("[SiegeEvaluator] persist failed: {}", e);
             }
 
             let _envelope = SiegeEnvelope {
@@ -109,18 +115,18 @@ impl SiegeEvaluator {
 
             if timer.elapsed() > std::time::Duration::from_secs(30) {
                 if processed > 0 {
-                    println!(
+                    debug!(
                         "[SiegeEvaluator] processed={}, queue_depth={}",
                         processed,
                         self.rx.len()
                     );
                 }
                 processed = 0;
-                timer = std::time::Instant::now();
+                timer = Instant::now();
             }
         }
 
-        eprintln!("[SiegeEvaluator] channel closed, exiting");
+        warn!("[SiegeEvaluator] channel closed, exiting");
     }
 
     fn assess(
