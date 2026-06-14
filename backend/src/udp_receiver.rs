@@ -1,4 +1,5 @@
 use crate::config::UdpConfig;
+use crate::metrics;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -6,6 +7,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::Sender;
+use tracing::{debug, info, warn, error};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UdpSensorMessage {
@@ -114,9 +116,11 @@ impl FrameParser {
             if stored_checksum == computed_checksum {
                 messages.push(payload_bytes.to_vec());
                 self.frames_valid += 1;
+                metrics::increment_udp_frames_valid();
             } else {
                 self.frames_corrupted += 1;
-                eprintln!(
+                metrics::increment_udp_frames_corrupted();
+                warn!(
                     "[UDP] Checksum mismatch: stored={}, computed={}, len={}",
                     stored_checksum, computed_checksum, payload_len
                 );
@@ -207,6 +211,7 @@ pub async fn run_udp_receiver(
             Ok((len, addr)) => {
                 let data = &buf[..len];
                 let received_at = Utc::now();
+                metrics::increment_udp_packets();
 
                 let mut payloads: Vec<Vec<u8>> = Vec::new();
 
@@ -255,11 +260,12 @@ pub async fn run_udp_receiver(
                         };
 
                         if let Err(e) = tx.send(envelope).await {
-                            eprintln!(
+                            warn!(
                                 "[UDP Receiver] failed to send to ballistic channel: {}",
                                 e
                             );
                         }
+                        metrics::gauge_udp_channel_depth(tx.capacity());
                     }
                 }
 
