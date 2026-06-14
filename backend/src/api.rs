@@ -5,9 +5,9 @@ use crate::siege::{assess_siege_damage, optimize_launch_parameters, SiegeInput, 
 use crate::storage::Database;
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
-    response::Json,
-    routing::{get, post},
+    http::{header, StatusCode},
+    response::{IntoResponse, Json},
+    routing::get,
     Router,
 };
 use serde::{Deserialize, Serialize};
@@ -249,6 +249,7 @@ async fn get_overview(State(state): State<AppState>) -> Json<ApiResponse<Vec<Ove
 
 pub fn create_router(state: AppState) -> Router {
     Router::new()
+        .route("/metrics", get(get_metrics))
         .route("/api/trebuchets", get(get_trebuchets))
         .route("/api/trebuchets/:id", get(get_trebuchet))
         .route("/api/trebuchets/:id/ballistics", get(get_latest_ballistics))
@@ -260,4 +261,19 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/calc/optimize", get(optimize_parameters))
         .route("/api/overview", get(get_overview))
         .with_state(state)
+}
+
+async fn get_metrics() -> impl IntoResponse {
+    match crate::metrics::prometheus_handle() {
+        Some(handle) => {
+            let body = handle.render();
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+                body,
+            )
+                .into_response()
+        }
+        None => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
 }
