@@ -26,7 +26,10 @@ CREATE TABLE IF NOT EXISTS sensor_data (
     air_density_kgm3 Float64
 ) ENGINE = MergeTree()
 PARTITION BY toYYYYMM(timestamp)
-ORDER BY (trebuchet_id, timestamp);
+ORDER BY (trebuchet_id, timestamp)
+TTL toDateTime(timestamp) + INTERVAL 30 DAY
+    DELETE
+    SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS ballistics_results (
     timestamp DateTime64(3),
@@ -42,7 +45,10 @@ CREATE TABLE IF NOT EXISTS ballistics_results (
     trajectory_points Array(Tuple(Float64, Float64, Float64))
 ) ENGINE = MergeTree()
 PARTITION BY toYYYYMM(timestamp)
-ORDER BY (trebuchet_id, timestamp);
+ORDER BY (trebuchet_id, timestamp)
+TTL toDateTime(timestamp) + INTERVAL 30 DAY
+    DELETE
+    SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS siege_assessments (
     timestamp DateTime64(3),
@@ -60,7 +66,10 @@ CREATE TABLE IF NOT EXISTS siege_assessments (
     optimal_velocity_mps Float64
 ) ENGINE = MergeTree()
 PARTITION BY toYYYYMM(timestamp)
-ORDER BY (trebuchet_id, timestamp);
+ORDER BY (trebuchet_id, timestamp)
+TTL toDateTime(timestamp) + INTERVAL 90 DAY
+    DELETE
+    SETTINGS index_granularity = 8192;
 
 INSERT INTO trebuchets (id, name, type, counterweight_kg, projectile_kg, arm_length_m, max_angle_deg) VALUES
 (1, '回回炮-甲', '配重式', 3000, 90, 12.0, 50.0),
@@ -91,3 +100,30 @@ INSERT INTO wall_types (id, name, material, thickness_m, density_kgm3, compressi
 (3, '石砌墙', 'stone_masonry', 4.0, 2400, 25000000, 2000000),
 (4, '双层夯土墙', 'double_rammed_earth', 6.0, 1700, 1800000, 180000),
 (5, '糯米灰浆墙', 'sticky_rice_lime', 3.5, 2100, 15000000, 1200000);
+
+CREATE TABLE IF NOT EXISTS siege_assessments_monthly_mv (
+    month Date,
+    trebuchet_id UInt32,
+    wall_material String,
+    avg_effectiveness_score Float64,
+    max_effectiveness_score Float64,
+    min_effectiveness_score Float64,
+    total_assessments UInt64,
+    avg_impact_energy_j Float64
+) ENGINE = SummingMergeTree()
+ORDER BY (month, trebuchet_id, wall_material);
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS siege_assessments_monthly_mv_mv
+TO siege_assessments_monthly_mv
+AS
+SELECT
+    toDate(timestamp) AS month,
+    trebuchet_id,
+    wall_material,
+    avg(effectiveness_score) AS avg_effectiveness_score,
+    max(effectiveness_score) AS max_effectiveness_score,
+    min(effectiveness_score) AS min_effectiveness_score,
+    count() AS total_assessments,
+    avg(impact_energy_j) AS avg_impact_energy_j
+FROM siege_assessments
+GROUP BY month, trebuchet_id, wall_material;
