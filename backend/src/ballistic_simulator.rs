@@ -2,13 +2,16 @@ use crate::ballistics::{
     estimate_projectile_diameter, simulate_ballistics, BallisticInput, BallisticResult,
 };
 use crate::config::{AppConfig, MaterialConfig, SolverConfig, AtmosphereConfig};
+use crate::metrics;
 use crate::storage::{Database, SensorData};
 use crate::udp_receiver::{SensorEnvelope, UdpSensorMessage};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::{mpsc::Receiver, mpsc::Sender, Mutex};
+use tracing::{debug, info, warn, error};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BallisticEnvelope {
@@ -47,9 +50,9 @@ impl BallisticSimulator {
     }
 
     pub async fn run(mut self) {
-        println!("[BallisticSimulator] started (RK4 + adaptive step)");
+        info!("[BallisticSimulator] started (RK4 + adaptive step)");
         let mut processed: u64 = 0;
-        let mut timer = std::time::Instant::now();
+        let mut timer = Instant::now();
 
         while let Some(envelope) = self.rx.recv().await {
             let SensorEnvelope {
@@ -69,12 +72,16 @@ impl BallisticSimulator {
 
                 self.persist_sensor_data(sensor_ts, &message).await;
 
+                let sim_start = Instant::now();
                 let (ballistic_input, result) = Self::compute_ballistics(
                     &message,
                     &trebuchet.projectile_kg,
                     &trebuchet.arm_length_m,
                     &self.config.material,
                 );
+                metrics::record_ballistic_duration(sim_start);
+                metrics::increment_ballistic_simulations();
+                metrics::gauge_ballistic_solver_steps(result.solver_steps);
 
                 Self::update_latest_cache(
                     &self.latest_results,
@@ -103,15 +110,16 @@ impl BallisticSimulator {
                 };
 
                 if let Err(e) = self.tx_to_siege.send(out).await {
-                    eprintln!(
+                    warn!(
                         "[BallisticSimulator] failed to send to siege channel: {}",
                         e
                     );
                 }
+                metrics::gauge_ballistic_channel_depth(self.tx_to_siege.capacity());
 
                 processed += 1;
             } else {
-                eprintln!(
+                warn!(
                     "[BallisticSimulator] unknown trebuchet id={}",
                     message.trebuchet_id
                 );
@@ -119,18 +127,18 @@ impl BallisticSimulator {
 
             if timer.elapsed() > std::time::Duration::from_secs(30) {
                 if processed > 0 {
-                    println!(
+                    debug!(
                         "[BallisticSimulator] processed={}, queue_depth={}",
                         processed,
                         self.rx.len()
                     );
                 }
                 processed = 0;
-                timer = std::time::Instant::now();
+                timer = Instant::now();
             }
         }
 
-        eprintln!("[BallisticSimulator] channel closed, exiting");
+        warn!("[BallisticSimulator] channel closed, exiting");
     }
 
     fn compute_ballistics(
